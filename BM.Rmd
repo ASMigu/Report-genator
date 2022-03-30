@@ -1,0 +1,938 @@
+---
+title: "Benchmarking Analysis of Tool Development"
+output: 
+  word_document:
+    reference_docx: template.docx
+    fig_height: 4
+    fig_width: 7.5
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+
+<br>
+  <br>
+  
+  
+```{r, results = "hide"}
+
+
+options(java.parameters = "-Xmx1000m")
+rm(list=ls())
+gc()
+
+Author <- c("")  
+
+
+swd <- c("/home/pdsaadmin/dataset/BM")
+setwd(swd)
+
+
+pcks <- (c("ggplot2", "data.table", "dplyr", 
+           "readxl", "flextable", "officer"))
+inpcks <- function(x){
+  for(i in x){
+    if(! require(i, character.only = TRUE)){
+      install.packages(i, dependencies = TRUE)
+      require(i, character.only = TRUE)
+    }
+  }
+} 
+inpcks(pcks)
+
+
+file_ <- list.files(path = swd, pattern = ".xlsx")
+path_ <- paste0(swd, "/", substring(file_, 1, 9))
+if(!file.exists(paste0(path_, "/", "plots"))) dir.create(paste0(path_, "/", "plots"))
+
+
+files_ <- list.files(path = path_, pattern = ".xlsx")
+component <- read_excel(paste0(path_, "/", files_[1]))
+dim_info  <- read_excel(paste0(path_, "/", files_[2]))
+info  <- read_excel(paste0(path_, "/", files_[3]))
+
+
+
+
+dim_info[, 4] <- dim_info[, 4] %>%
+  mutate_if(is.character, as.factor)
+
+dim_info$Type <- ordered(dim_info$Type, 
+                         levels = c("Critical", "Process", "Non-critical"))
+
+
+dim_info <- dim_info[
+  with(dim_info, order(Type, Dimension)),
+  ]
+
+
+
+component[,c(1:3)] <- component[,c(1:3)] %>% 
+  mutate_if(is.character, as.factor)
+dim_info[,c(1, 3)] <- dim_info[,c(1, 3)] %>%
+  mutate_if(is.character, as.factor)
+
+component <- merge(component, dim_info, by = "Dimension")
+component["Value"] <- component["Value"] + component["Compensation"]
+
+
+
+component$OOS <- ifelse((component["Value"] < component["LSL"]) | 
+                          (component["Value"] > component["USL"]), 1, 0) 
+
+component[is.na(component$OOS), "OOS"] <- 0
+
+
+
+agg.descriptive <- function(x) {
+  c(Mean = mean(x, na.rm = FALSE), 
+    Stdev = sd(x, na.rm = FALSE), 
+    Sample = length(x),
+    Min = min(x),
+    Max = max(x))
+}
+
+agg.OOS <- function(x){
+  c(OOS = sum(x, na.rm = FALSE))
+}
+
+
+temp_1 <- aggregate(Value ~ Dimension, 
+                    data = component, 
+                    FUN = agg.descriptive)
+temp_1$Cavity <- "All"
+temp_1 <- cbind(temp_1,
+                aggregate(OOS ~ Dimension, 
+                          data = component, 
+                          FUN = agg.OOS)[2]) 
+
+
+temp_2 <- aggregate(Value ~ Dimension + Cavity, 
+                    data = component, 
+                    FUN = agg.descriptive)
+temp_2 <- cbind(temp_2,
+                aggregate(OOS ~ Dimension + Cavity,
+                          data = component,
+                          FUN = agg.OOS)[3])
+
+
+
+
+
+
+summary_data <- rbind(do.call(data.frame, temp_1), 
+                      do.call(data.frame, temp_2))
+rm(temp_1, temp_2)
+summary_data <- merge(summary_data, dim_info, by = "Dimension")
+
+colnames(summary_data)[colnames(summary_data) 
+                       %in% c("Value.Mean", 
+                              "Value.Stdev", 
+                              "Value.Sample",
+                              "Value.Min",
+                              "Value.Max")] <- c("Mean", "StDev", "Sample size", "Min", "Max")
+
+
+
+
+
+
+set.seed(123)
+summary_data[, "StDev"] <- ifelse(summary_data[, "StDev"] > 0, 
+                                  summary_data[, "StDev"], 
+                                  (runif(n = 1, min = 1e-12, max = .9999999999)) / 90) 
+
+summary_data <- summary_data %>% 
+  arrange(Dimension, Cavity)
+
+for(i in dim_info[, 2, drop = TRUE]){
+  summary_data[which(summary_data["Dimension"] == i), ][2, 3] <- 
+    if(nrow(unique(summary_data[which(summary_data["Dimension"] == i), ]["StDev"])) == 1){
+      summary_data[which(summary_data["Dimension"] == i), ][1, 3] * 1.0001
+    } else {
+      summary_data[which(summary_data["Dimension"] == i), ][2, 3]
+    }
+}
+
+
+
+
+judge <- function(x){
+  
+  judgement <- ifelse(is.na(x["LSL"]) & is.na(x["USL"]), "No_spce",
+                      ifelse(is.na(x["USL"]),"The_higher_the_better",
+                             ifelse(is.na(x["LSL"]), "The_lower_the_better",
+                                    ifelse(x["LSL"] == x["Specification"], "The_lower_the_better",
+                                           ifelse(x["USL"] == x["Specification"], "The_higher_the_better",
+                                                  "the_nominal_the_better"
+                                                  )
+                                           )
+                                    )
+                             )
+                      )
+
+  summary_data <<- do.call(data.frame, 
+                           data.frame(x, judgement = judgement, row.names = NULL) ) 
+  
+}
+
+
+
+
+judge(summary_data)
+colnames(summary_data)[17] <- c("Judgement")
+
+
+Pp_Ppk <- function(x){
+  
+  Pp <- ifelse(x["Judgement"] == "No_spce", NA,
+               ifelse(x["Judgement"] == "The_lower_the_better", (x[, "USL"] - x[, "Mean"]) / (3 * x[, "StDev"]),
+                      ifelse(x["Judgement"] == "The_higher_the_better", (x[, "Mean"] - x[, "LSL"]) / (3 * x[, "StDev"]),
+                             (x[, "USL"] - x[, "LSL"]) / (6 * x[, "StDev"]))))
+  
+  Ppk <- ifelse(x["Judgement"] == "No_spce", NA,
+                ifelse(x["Judgement"] == "The_lower_the_better", (x[, "USL"] - x[, "Mean"]) / (3 * x[, "StDev"]),
+                       ifelse(x["Judgement"] == "The_higher_the_better", (x[, "Mean"] - x[, "LSL"]) / (3 * x[, "StDev"]),
+                              apply(data.frame(Ppl = (x[, "USL"] - x[, "Mean"])  / (3 * x[, "StDev"]), 
+                                               Ppu = (x[,  "Mean"] - x[, "LSL"]) / (3 * x[, "StDev"])),1, min))))
+  
+  UCI_Ppk <- Ppk - qnorm(0.975) * sqrt(1 / ((6 / 2) ^ 2)/x[, "Sample.size"] 
+                                       + (Ppk ^ 2) / 2 / (x[, "Sample.size"] - 1))
+  
+  LCI_Ppk <- Ppk + qnorm(0.975) * sqrt(1 / ((6 / 2) ^ 2)/x[, "Sample.size"] 
+                                       + (Ppk ^ 2) / 2 / (x[, "Sample.size"] - 1))
+  
+  summary_data <<- cbind(x, Pp, Ppk, LCI_Ppk, UCI_Ppk)
+  
+}
+
+Pp_Ppk(summary_data)
+
+colnames(summary_data)[c(4, 8, 18:21)] <- c("Sample_size", "OOS","Pp", "Ppk", 
+                                         "Upper 95% CI of Ppk", 
+                                         "Lower 95% CI of Ppk")
+
+summary_data <- summary_data[c("Type","Toolset", "Dimension",
+                               "Cavity", "Mean", "StDev", "Min", "Max",
+                               "Sample_size", "Pp", "Ppk",
+                               "Lower 95% CI of Ppk",
+                               "Upper 95% CI of Ppk",
+                               "OOS")]
+
+
+summary_data <- summary_data[
+  with(summary_data, order(Type, Dimension, Cavity)),
+  ]
+
+
+eac_data <- summary_data
+
+rou <- c("Mean", "Min", "Max", "Pp", "Ppk", "Lower 95% CI of Ppk", "Upper 95% CI of Ppk")
+summary_data[rou] <- round(summary_data[rou], 2)
+summary_data["StDev"] <- round(summary_data["StDev"], 3)
+
+
+
+summary_c <- summary_data %>%
+  filter(Type == "Critical" | Type == "Process")
+summary_n <- filter(summary_data, Type == "Non-critical")
+summary_c["Dimension"] <- summary_c["Dimension"] %>% mutate_if(is.factor, as.character)
+summary_n["Dimension"] <- summary_n["Dimension"] %>% mutate_if(is.factor, as.character)
+
+
+
+Ppk_judege <- summary_data[, c("Cavity","Type", "Ppk")] %>% 
+  filter(Cavity == "All", Type == "Critical" | Type == "Process") %>% 
+  mutate(j = ifelse(Ppk > 1.33, 0, 1)) %>% 
+  summarise(s = sum(j)) %>% 
+  `[[`(1)
+
+
+string_c <- summary_data %>% 
+  filter(Type == "Critical" | Type == "Process") %>% 
+  filter(Ppk < 1.33) %>% 
+  distinct(Dimension) %>% 
+  `[[`(1) 
+
+warning_c <- if(length(string_c) == 0){
+  ""
+} else {
+  do.call(paste, c(as.list(string_c), sep = ", "))
+}
+
+string_n <- summary_data %>% 
+  filter(Cavity == "All", Type == "Non-critical") %>% 
+  filter(Ppk < 1.33) %>% 
+  distinct(Dimension) %>% 
+  `[[`(1) 
+
+warning_n <- if(length(string_n) == 0){
+  ""
+} else {
+  do.call(paste, c(as.list(string_n), sep = ", "))
+}
+
+```
+
+
+
+**Project and component information**
+```{r }
+com <- info[7, 4]
+mat <- info[5, 9]
+dra <- info[6, 9]
+too <- info[8, 4]
+mea <- paste0(substring(file_, 1, 9), 
+              " Rev.", substring(file_, nchar(file_) - 6, nchar(file_) - 5))
+
+H1 <- c("Project name", "Project code", "Component", "Material type",
+        "Drawing no. / Rev.", "Measurement Report no. / Rev.", 
+        "Measurement Method Correlation Study no./ Rev.", "Tool no.")
+H2 <- c("", "", com, mat, dra, mea, "", too)
+myTable <- tibble(H_1 = H1,
+                  H_2 = H2)
+
+std_border = fp_border(color="black", width = 1)
+
+regulartable(myTable) %>%
+   width(width = c(rep(3.75, 2))) %>%
+   bg(i = seq(1, nrow(myTable[1]), 1), j = 1, bg = "grey85") %>%
+   color(color = "black", part = "header") %>%
+   delete_part(part = "header") %>% 
+   border_outer(part = "all", border = fp_border(color = "black", width = 2.5)) %>%
+   border_inner(part = "all", border = fp_border(color = "black", width = 1)) %>%
+   fontsize(size = 10, part = "all" ) %>%
+   align(align = "center", part = "all")
+
+```
+
+<br>
+  <br>
+
+
+**Report revision information**
+```{r }
+std_border = fp_border(color="black", width = 1)
+myTable <- tibble(Revision = c("1.0"),
+                 Description = c("Initial revision"),
+                 #Author = Author,
+                 Date = gsub("-", "", substring(Sys.time(), 1, 10))
+                 )
+                 
+
+regulartable(myTable) %>%
+   width(width = c(1.5, 4.5, 1.5)) %>%
+   height(i = 1, height = c(10), part = "body") %>%
+   bg(bg = "grey85", part = "header") %>%
+   color(color = "black", part = "header") %>%
+   border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+   border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+   fontsize(size = 10, part = "all" ) %>%
+   align(align = "center", part = "all")
+```
+
+<br>
+  <br>
+
+**Approval log**
+```{r }
+std_border = fp_border(color="black", width = 1)
+myTable <- tibble(Role = c("Author of Statistic", "Approver"),
+                 Name = c(Author, ''),
+                 Department = c("PDST", "PDMP"),
+                 Signature = c("", "")
+                 )
+
+regulartable(myTable) %>%
+   height(height = 0.35, part = "body") %>%
+   hrule(rule = "exact", part = "body") %>% 
+   width(width = c(rep(1.875, 4))) %>%
+   bg(bg = "grey85", part = "header") %>%
+   color(color = "black", part = "header") %>%
+   border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+   border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+   fontsize(size = 10, part = "all" ) %>%
+   align(align = "center", part = "all")
+```
+
+
+\newpage
+
+
+# Summary  
+The analysis results of cavity benchmarking including process capability indexes of critical, process and non-critical dimensions as well as equivalence testing of cavities are summarized as follows:     
+
+<br>
+
+`r library(dplyr) ; ifelse(nrow(filter(dim_info, Type == "Critical" | Type == "Process")) == 0, "", "## Process Capability Index of Critical and Process Dimension(s)")`   
+
+
+`r ifelse((table(dim_info$Type)[1] + table(dim_info$Type)[2]) == 0, "", ifelse(length(string_c) > 0, paste("As a result, critical and process dimensions", warning_c, "cannot meet the criteria of Ppk>=1.33 based on cross cavity."),"As a result, all critical and process dimensions meet the criteria of Ppk>=1.33 based on cross cavity."))`   
+
+
+```{r, comment = ""}
+if(nrow(summary_c) == 0){
+  cat("")
+} else {
+    myTable1 <- summary_data %>% 
+  filter(Cavity == "All") %>%
+  filter(Type == "Critical" | Type == "Process") %>% 
+  subset(select = -c(Type, Toolset)) %>% 
+  tibble()
+  names(myTable1)[7] <- c("Sample size")
+
+  regulartable(myTable1) %>%
+    height(height = c(1)) %>%
+    width(width = c(rep(0.625, 12))) %>%
+    bg(bg = "grey85", part = "header") %>%
+    color(color = "black", part = "header") %>%
+    color(i = which(myTable1["Ppk"] < 1.33), j = 9, color = "red2") %>% 
+    color(i = which(myTable1["OOS"] > 0), j = 12, color = "red2") %>% 
+    border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+    border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+    fontsize(size = 10, part = "all" ) %>%
+    align(align = "center", part = "all")
+}
+
+```
+  
+<br>
+
+`r print(string_c)`
+  
+`r ifelse((table(dim_info$Type)[3]) == 0, "", "## Process Capability Index of Non-critical Dimension(s)")`      
+
+
+`r ifelse((table(dim_info$Type)[3]) == 0, "", ifelse(length(string_n) > 0, paste("As a result, non-critical dimensions", warning_n, "cannot meet the criteria of Ppk>=1.33 based on cross cavity."),"As a result, all non-critical dimensions meet the criteria of Ppk>=1.33 based on cross cavity."))`  
+ 
+
+```{r, comment = ""}
+if(nrow(summary_n) == 0){
+  cat("")
+} else{
+  myTable2 <- summary_data %>% 
+  filter(Cavity == "All") %>%
+  filter(Type == "Non-critical") %>% 
+  subset(select = -c(Type, Toolset)) %>% 
+  tibble()
+  names(myTable2)[7] <- c("Sample size")
+
+  regulartable(myTable2) %>%
+    height(height = c(1)) %>%
+    width(width = c(rep(0.625, 12))) %>%
+    bg(bg = "grey85", part = "header") %>%
+    color(color = "black", part = "header") %>%
+    color(i = which(myTable2["Ppk"] < 1.33), j = 9, color = "red2") %>% 
+    color(i = which(myTable2["OOS"] > 0), j = 12, color = "red2") %>% 
+    border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+    border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+    fontsize(size = 10, part = "all" ) %>%
+    align(align = "center", part = "all")
+}
+
+```
+
+<br>
+
+## Equivalence of Cavities 
+
+```{r, results = "hide"}
+
+all_tbl <- eac_data %>%
+  filter(Cavity != "All") %>%
+  select(-c(Toolset, Min, Max, OOS), Sample = Sample_size) %>% 
+  group_by(Dimension) %>%
+  mutate(bgcol = ifelse(Ppk == max(Ppk), 1, ifelse(Ppk == min(Ppk), 2, 3)))
+
+
+extrem_Ppk  <- rbind(all_tbl %>% 
+                       group_by(Dimension) %>% 
+                       filter(bgcol == 1) %>% 
+                       slice(1L), 
+                     all_tbl %>% 
+                       group_by(Dimension) %>% 
+                       filter(bgcol == 2) %>% 
+                       slice(1L)) %>%
+  arrange(Type, Dimension)
+
+
+diff_tbl <- setdiff(all_tbl, extrem_Ppk)
+
+eac_tbl <- diff_tbl %>% 
+  mutate(bgcol = 3) %>% 
+  rbind(extrem_Ppk) %>%  
+  arrange(Type, Dimension, Cavity)
+
+rou_var <- c("Mean", "Pp", "Ppk", "Lower 95% CI of Ppk", "Upper 95% CI of Ppk")
+eac_tbl[rou_var] <- round(eac_tbl[rou_var], 2)
+eac_tbl["StDev"] <- round(eac_tbl["StDev"], 3)
+
+
+refgroup <- all_tbl %>% 
+  group_by(Dimension) %>% 
+  filter(bgcol == 1) %>% 
+  slice(1L) %>% 
+  merge(dim_info, by = "Dimension") %>% 
+  select(-c("bgcol", "Toolset", "Compensation",
+            "Type.y", "Upper_tolerance", "Lower_tolerance"))
+
+
+testgroup <- all_tbl %>% 
+  group_by(Dimension) %>% 
+  filter(bgcol == 2) %>% 
+  slice(1L) %>% 
+  merge(dim_info, by = "Dimension") %>% 
+  select(-c("bgcol", "Toolset", "Compensation",
+            "Type.y", "Upper_tolerance", "Lower_tolerance")) 
+
+
+
+
+ttest.simulate <- component %>%
+  subset(select = -c(Specification.x, Upper_tolerance.x, Lower_tolerance.x,
+                     Compensation, Upper_tolerance.y, Lower_tolerance.y,
+                     OOS, Toolset)) %>%
+  group_by(Dimension, Cavity) %>%
+  summarise(n = n_distinct(Value)) %>%
+  mutate(judgement = ifelse(n == 1, TRUE, FALSE)) %>%
+  group_by(Dimension) %>% 
+  select(-n)
+
+
+ttest.data <- component[, c(1, 3, 7, 10)] %>% 
+  arrange(Type, Dimension, Cavity)
+
+for (i in 1:nrow(ttest.simulate)){
+  ttest.data[which(ttest.data[, "Dimension", TRUE] == ttest.simulate[i, "Dimension", TRUE] &
+                     ttest.data[, "Cavity", TRUE] == ttest.simulate[i, "Cavity", TRUE]), "Value"] <-
+    if(ttest.simulate[i, "judgement", TRUE]){
+        c(ttest.data[which(ttest.data[, "Dimension", TRUE] == ttest.simulate[i, "Dimension", TRUE] &
+                ttest.data[, "Cavity", TRUE] == ttest.simulate[i, "Cavity", TRUE]), "Value"][1] * sample(1 + (91:100/ 1e6), 1),
+          ttest.data[which(ttest.data[, "Dimension", TRUE] == ttest.simulate[i, "Dimension", TRUE] &
+                ttest.data[, "Cavity", TRUE] == ttest.simulate[i, "Cavity", TRUE]), "Value"][-1])
+    } else {
+        ttest.data[which(ttest.data[, "Dimension", TRUE] == ttest.simulate[i, "Dimension", TRUE] &
+                     ttest.data[, "Cavity", TRUE] == ttest.simulate[i, "Cavity", TRUE]), "Value"]
+    }
+}
+
+for(i in 1:nrow(refgroup)){
+  
+  # UEL LEL
+  if(is.na(refgroup[i, "LSL", drop = TRUE]) | is.na(refgroup[i, "USL", drop = TRUE])){
+    refgroup[i, "LEL"] <- -2 * ((refgroup[i, "Sample", drop = TRUE] - 1) * 
+                             (refgroup[i, "StDev", drop = TRUE] ^ 2) / 
+                             qchisq(0.95, (refgroup[i, "Sample", drop = TRUE] - 1), 
+                                    lower.tail = FALSE)) ^ (1 / 2) 
+    refgroup[i, "UEL"] <- -1 * refgroup[i, 14] 
+  } else {
+    refgroup[i, "LEL"] <- (refgroup[i, "USL", drop = TRUE] - refgroup[i, "LSL", drop = TRUE]) * -0.2
+    refgroup[i, "UEL"] <- -1 * refgroup[i, 14]
+  }
+  
+  
+  
+  refgroup[i, c("LCI_of_mean", "UCI_of_mean")] <- t.test(ttest.data %>%
+                                                           filter(Dimension == testgroup$Dimension[i] & 
+                                                                    Cavity == as.character(testgroup$Cavity[i])) %>% 
+                                                           select(Value),
+                                                         ttest.data %>% 
+                                                           filter(Dimension == refgroup$Dimension[i] & 
+                                                                    Cavity == as.character(refgroup$Cavity[i])) %>% 
+                                                           select(Value),
+                                                         conf.level = 0.90,
+                                                         alternative = "two.sided"
+  )$conf.int[1:2]
+  
+  
+  
+  refgroup[i, "Equivalent Result"] <- ifelse(refgroup[i, "LCI_of_mean", TRUE] < refgroup[i, "LEL", TRUE] | 
+                                       refgroup[i, "UCI_of_mean", TRUE] > refgroup[i, "UEL", TRUE], 
+                                     "not equivalence", 
+                                     "equivalence")
+  
+}
+
+
+
+rm(all_tbl, extrem_Ppk, diff_tbl)
+
+
+
+eac_tbl %<>% merge(refgroup[c("Dimension", "Equivalent Result")], by = "Dimension") %>% 
+  arrange(Type, Dimension)
+
+
+
+
+
+options(scipen = 99999)
+
+
+
+eacplt.data <- refgroup %>%
+  select(-c("Mean", "StDev", "Sample", "Pp", "Ppk", "LSL", "USL", 
+            "Specification", "Lower 95% CI of Ppk", "Upper 95% CI of Ppk")) %>% 
+  merge(testgroup[c("Dimension", "Cavity")], by = "Dimension") %>% 
+  rename(Cavity_ref = Cavity.x, Cavity_test = Cavity.y, Type = Type.x) %>% 
+  mutate(LCI_of_mean = round(LCI_of_mean, 4), UCI_of_mean = round(UCI_of_mean, 4),
+         LEL = round(LEL, 4), UEL = round(UEL, 4)) %>% 
+  arrange(Type, Dimension)
+
+```
+
+
+
+`r ifelse((table(dim_info$Type)[1] + table(dim_info$Type)[2]) == 0, "", ifelse(Ppk_judege > 0, "In the section 3, some Ppk values of critical and process dimensions do not meet the criteria of Ppk > 1.33.", "In the section 3, all Ppk values of critical and process dimensions meet the criteria of Ppk > 1.33."))` `r ifelse((eacplt.data[, 8] %in% "equivalence" %>% sum()) == nrow(eacplt.data), "From the equivalent test, we conclude that all dimensions pass the equivalent test, which represents the similarity among cavity at the 0.10 significant level can be claimed.", "From the equivalent test, we conclude that not all dimensions pass the equivalent test, which represents the similarity among cavity at the 0.10 significant level cannot be claimed.")` `r ifelse((table(dim_info$Type)[1] + table(dim_info$Type)[2])[[1]] == 0, ifelse((eacplt.data[, 8] %in% "equivalence" %>% sum()) == nrow(eacplt.data), "Based on the analysis result, the reduced Verification Run can be applied.", "Based on the analysis result, the reduced Verification Run cannot be applied."), ifelse(((eacplt.data[, 8] %in% "equivalence" %>% sum()) == nrow(eacplt.data)) & Ppk_judege == 0, "Based on the analysis result, the reduced Verification Run can be applied.", "Based on the analysis result, the reduced Verification Run cannot be applied."))`
+
+
+\newpage
+
+# Objective  
+
+This analysis is conducted for the component: `r com` (`r too`). The purpose of this report is to understand the equivalence of cavities for each dimension of this component. In addition, if all dimensions are claimed equivalent and Ppk values based on across cavities of critical and process dimensions are higher than 1.33, the number of cavities to be measured in the Verification Run stage can be reduced to 2 cavities.     
+
+<br>
+
+# Data Description
+Due to methodology discrepancy between CT scan and caliper & 3DV, engineering team needs to conduct a study to evaluate the gap between CT scan and caliper & 3DV and then the significant difference has to be compensated for raw data (measured by CT scan) as simulated data are generated by caliper & 3DV. The decision of which dimension(s) need to be compensated is based on the Measurement Method Correlation Study.  
+
+There are `r ifelse(table(dim_info["Type"])[[1]] + table(dim_info["Type"])[[2]] == 0, "", paste0(table(dim_info["Type"])[[1]] + table(dim_info["Type"])[[2]], " critical and process dimensions"))` `r ifelse(dim_info$Type %>% unique() %in% c("Critical", "Process", "Non-critical") %>% sum() == 3, "and", "")` `r ifelse(table(dim_info["Type"])[[3]] == 0, "", paste0(table(dim_info["Type"])[[3]], " non-critical dimensions"))`, that need to be analyzed for this subject tool. The details regarding dimension information can be referred to the table below and the sample size can be referred to the table listed in section 4.    
+
+
+```{r}
+myTable3 <- tibble(dim_info[c(4,2,6,5,7,8,9)])
+
+names(myTable3)[3:4] <- c("Lower tolerance", "Upper tolerance")
+
+regulartable(myTable3) %>%
+   height(height = c(1)) %>%
+   width(width = c(rep(1.07, 7))) %>%
+   bg(bg = "grey85", part = "header") %>%
+   merge_v(j = "Type") %>% 
+   color(color = "black", part = "header") %>%
+   border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+   border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+   fontsize(size = 10, part = "all" ) %>%
+   align(align = "center", part = "all")
+```
+
+
+<br>
+
+`r ifelse((table(dim_info$Type)[1] + table(dim_info$Type)[2]) == 0, "", "## Process Capability Index of Critical & Process Dimension(s)")`  
+
+`r ifelse((table(dim_info$Type)[1] + table(dim_info$Type)[2]) == 0, "", ifelse(length(string_c) > 0, paste("As a result, critical and process dimensions", warning_c, "cannot meet the criteria of Ppk>=1.33 based on cross cavity."),"As a result, all critical and process dimensions meet the criteria of Ppk>=1.33 based on cross cavity."))`    
+```{r}
+if(nrow(summary_c) == 0){
+  cat("")
+} else {
+  myTable1 <- summary_data %>% 
+  filter(Cavity == "All") %>%
+  filter(Type == "Critical" | Type == "Process") %>% 
+  subset(select = -c(Type, Toolset)) %>% 
+  tibble()
+  names(myTable1)[7] <- c("Sample size")
+
+  regulartable(myTable1) %>%
+    height(height = c(1)) %>%
+    width(width = c(rep(0.625, 12))) %>%
+    bg(bg = "grey85", part = "header") %>%
+    color(color = "black", part = "header") %>%
+    color(i = which(myTable1["Ppk"] < 1.33), j = 9, color = "red2") %>% 
+    color(i = which(myTable1["OOS"] > 0), j = 12, color = "red2") %>% 
+    border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+    border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+    fontsize(size = 10, part = "all" ) %>%
+    align(align = "center", part = "all")
+}
+```
+
+
+<br>
+
+`r ifelse(nrow(summary_c) == 0, "", ifelse(min(summary_c[which(summary_c[, "Cavity"] == "All"), "Ppk"], na.rm = TRUE) < 1.33, "The statistic findings for abnormal dimensions are as follows.", ""))`
+```{r comment = ""}
+if(nrow(summary_c) == 0){
+  cat("")
+} else {
+  if(min(summary_c[which(summary_c[, "Cavity"] == "All"), "Ppk"], na.rm = TRUE) < 1.33){
+
+H1 <- c("Abnormal dimensions", "state the dimensions corresponding to the finding as examples below", 
+        "01, 03", "02_1, 02_2")
+H2 <- c("Statistic findings", "write down your finding(s) as examples below", 
+        "High-within group variance and OOS issue", "OOS issue and high between-group variance")
+
+myTable <- tibble(H_1 = H1,
+                  H_2 = H2) 
+
+std_border = fp_border(color="black", width = 1)
+
+regulartable(myTable) %>%
+   width(width = c(3, 4.5)) %>%
+   bg(i = 1, j = c(1,2), bg = "grey85") %>%
+   color(color = "black", part = "header") %>%
+   delete_part(part = "header") %>% 
+   border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+   border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+   fontsize(size = 10, part = "all" ) %>%
+   align(align = "center", part = "all")
+
+
+} else {
+  cat("")
+  }
+}
+
+
+```
+
+
+<br>
+
+`r ifelse((table(dim_info$Type)[3]) == 0, "", "## Process Capability Index of Non-critical Dimension(s)")`      
+
+
+`r ifelse((table(dim_info$Type)[3]) == 0, "", ifelse(length(string_n) > 0, paste("As a result, non-critical dimensions", warning_n, "cannot meet the criteria of Ppk>=1.33 based on cross cavity."),"As a result, all non-critical dimensions meet the criteria of Ppk>=1.33 based on cross cavity."))`  
+ 
+
+```{r, comment = ""}
+if(nrow(summary_n) == 0){
+  cat("")
+} else{
+  myTable2 <- summary_data %>% 
+  filter(Cavity == "All") %>%
+  filter(Type == "Non-critical") %>% 
+  subset(select = -c(Type, Toolset)) %>% 
+  tibble()
+  names(myTable2)[7] <- c("Sample size")
+
+  regulartable(myTable2) %>%
+    height(height = c(1)) %>%
+    width(width = c(rep(0.625, 12))) %>%
+    bg(bg = "grey85", part = "header") %>%
+    color(color = "black", part = "header") %>%
+    color(i = which(myTable2["Ppk"] < 1.33), j = 9, color = "red2") %>% 
+    color(i = which(myTable2["OOS"] > 0), j = 12, color = "red2") %>% 
+    border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+    border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+    fontsize(size = 10, part = "all" ) %>%
+    align(align = "center", part = "all")
+}
+
+```
+
+<br>
+
+`r ifelse(nrow(summary_n) == 0, "", ifelse(min(summary_n[which(summary_n[, "Cavity"] == "All"), "Ppk"], na.rm = TRUE) < 1.33, "The statistic findings for abnormal dimensions are as follows.", ""))`
+```{r comment = ""}
+if(nrow(summary_n) == 0){
+  cat("")
+} else {
+  if(min(summary_n[which(summary_n[, "Cavity"] == "All"),"Ppk"], na.rm = TRUE) < 1.33){
+
+H1 <- c("Abnormal dimensions", "state the dimensions corresponding to the finding as examples below", 
+        "01, 03", "02_1, 02_2")
+H2 <- c("Statistic findings", "write down your finding(s) as examples below", 
+        "High-within group variance and OOS issue", "OOS issue and high between-group variance")
+
+myTable <- tibble(H_1 = H1,
+                  H_2 = H2) 
+
+std_border = fp_border(color="black", width = 1)
+
+regulartable(myTable) %>%
+   width(width = c(3, 4.5)) %>%
+   bg(i = 1, j = c(1,2), bg = "grey85") %>%
+   color(color = "black", part = "header") %>%
+   delete_part(part = "header") %>% 
+   border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+   border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+   fontsize(size = 10, part = "all" ) %>%
+   align(align = "center", part = "all")
+
+
+} else {
+  cat("")
+  }
+}
+
+
+```
+
+<br>
+
+## Boxplot of each Dimension
+
+```{r}
+plt.cn <- component %>% 
+  subset(select = -c(Specification.x, Upper_tolerance.x, Lower_tolerance.x,
+                     Compensation, Upper_tolerance.y, Lower_tolerance.y, 
+                     OOS, Toolset))
+
+dim_info1 <- dim_info %>% 
+  as.data.frame()
+
+
+trim <- plt.cn %>% 
+  group_by(Dimension, Cavity) %>% 
+  summarise(n = n_distinct(Value)) %>% 
+  mutate(judgement = ifelse(n == 1, TRUE, FALSE)) %>% 
+  group_by(Dimension) %>% 
+  summarise(trim = as.numeric(sum(judgement))) %>% 
+  mutate(trim = ifelse(trim > 0, TRUE, FALSE)) %>% 
+  as.data.frame
+
+for(i in 1:nrow(dim_info)){
+  plt <- plt.cn %>%
+    filter(Dimension == dim_info1[i, "Dimension"]) %>% 
+    ggplot(aes(x = Cavity, y = Value, fill = Cavity)) +
+    geom_point(alpha = 0.6, show.legend = FALSE) +
+    geom_boxplot(aes(fill = Cavity), na.rm = TRUE, outlier.colour = 2, alpha = 0.8, show.legend = TRUE) +
+    geom_hline(yintercept = dim_info1[i, c("LSL")],
+               color = "red", linetype = "longdash") +
+    geom_hline(yintercept = dim_info1[i, c("Specification")],
+               color = "red", linetype = "longdash") +
+    geom_hline(yintercept = dim_info1[i, c("USL")],
+               color = "red", linetype = "longdash") +
+    ggtitle(paste("Boxplot of", dim_info1[i, "Type"], 
+                  "Dimension", dim_info1[i, c("Dimension")])) +
+    theme_bw() +
+    scale_fill_brewer(palette = "Set1") +
+    #theme(axis.text.x = element_text(angle = 20, vjust = 1, hjust = 0.5, size = 10)) +
+    theme(plot.title = element_text(size   = 15, hjust  = 0.5, 
+                                    face   = "bold", colour = "black", 
+                                    vjust  = 1)) 
+  
+  print(plt)
+}
+
+rm(plt.cn)
+
+```
+
+# Equivalent test
+
+The equivalent test will be applied to cavity benchmarking for all dimensions. Once the equivalent test and Ppk > 1.33 (based on pooled cavity) of critical and process dimensions pass the criteria, the number of cavities to be measured in the Verification Run stage can be reduced to 2 cavities.  
+
+<br>
+
+<span style = "text-decoration: underline;">**Method: Equivalent test for benchmarking**</span>
+The steps of the analysis are as follows:   
+
+- **Step 1**: Pick up the two extreme cavities based on the Ppk value to define the reference cavity (the highest Ppk value) and the test cavity (the lowest Ppk value);
+- **Step 2**: Define the EAC based on 20% of the specification, because of considerations for practice.
+- **Step 3**: Perform the equivalent test, and then determine If the mean difference is within the EAC, then cavities for the studied dimension can be claimed equivalence, whereas, the studied dimension cannot be claimed equivalence.  
+
+<br>
+
+## Benchmarking analysis for all dimension(s)   
+Cavity benchmarking analyses for all dimensions are presented in the table below. The cell in green is the reference cavity (the highest Ppk value) and the blue one is the test cavity (the lowest Ppk value). The equivalent test will be used to demonstrate the equivalence between these two cavities (the best one and the worst one). If they pass the equivalent test, the equivalence between all cavities can be claimed.
+
+<br>
+
+**Equivalent test output of all dimensions**    
+```{r}
+myTable1 <- eac_tbl %>%
+  select(-c(bgcol)) %>%
+  arrange(Type, Dimension) %>% 
+  tibble()
+
+
+
+regulartable(myTable1) %>%
+  height(height = c(1)) %>%
+  width(width = c(rep(7.5/11, 11))) %>%
+  merge_v(j = "Dimension", target = c("Dimension", "Type","Equivalent Result")) %>%
+  bg(bg = "grey85", part = "header") %>%
+  bg(i = which(eac_tbl["bgcol"] == 1), j = 3:10, bg = "green4", part = "body") %>%
+  bg(i = which(eac_tbl["bgcol"] == 2), j = 3:10, bg = "dodgerblue3", part = "body") %>%
+  color(color = "black", part = "header") %>%
+  color(i = which(eac_tbl["Ppk"] < 1.33), j = 8, color = "red2") %>%
+  color(i = which(eac_tbl["Equivalent Result"] == "not equivalence"), j = 11, color = "red2") %>% 
+  border_outer(part = "all", border = fp_border(color="black", width = 2.5)) %>%
+  border_inner(part = "all", border = fp_border(color="black", width = 1)) %>%
+  fontsize(size = 10, part = "all") %>%
+  align(align = "center", part = "all")
+
+```
+
+
+<br>
+
+## EAC plot of all dimensions   
+
+The above table can be analyzed in the following plots in the aim the reader can intuitively and visually check EAC results of each dimension.  
+```{r}
+
+for(i in 1:(myTable1 %>% distinct(Dimension) %>% nrow)){
+  
+  subtitle <- paste0("Equivalence Test: Mean (Cavity: ", eacplt.data[i, "Cavity_test"],
+                     ") - Mean (Cavity: ", eacplt.data[i, "Cavity_ref"], ")", "\n")
+  cap1 <- paste0("90% CI for Mean(Cavity: ", eacplt.data[i, "Cavity_test"], ") - Mean(Cavity: ", eacplt.data[i, "Cavity_ref"], 
+                 "): (", eacplt.data[i, "LCI_of_mean"], ",", eacplt.data[i, "UCI_of_mean"], ")","\n")
+  
+  cap2 <- ifelse(eacplt.data[i, "Equivalent Result"] == "equivalence", 
+                 paste0("CI is within the equivalence interval of (", eacplt.data[i, "LEL"], 
+                        ",", eacplt.data[i, "UEL"], "). Can claim equivalence."),
+                 paste0("CI is not wcithin the equivalence interval of (", eacplt.data[i, "LEL"], 
+                        ",", eacplt.data[i, "UEL"], "). Can not claim equivalence."))
+  
+  
+  
+  eac <- ggplot(eacplt.data, aes(LEL, seq(1:10))) +
+      geom_point(aes(x = LCI_of_mean[i], y = 7.5), data = eacplt.data, shape = "|", cex = 10, colour = "royalblue3") +
+      geom_point(aes(x = UCI_of_mean[i], y = 7.5), data = eacplt.data, shape = "|", cex = 10, colour = "royalblue3") +
+      geom_point(aes(x = (LCI_of_mean[i] + UCI_of_mean[i]) / 2 , y = 7.5), 
+                 data = eacplt.data, shape = 10, cex = 3, colour = "royalblue3") +
+      geom_point(aes(x = (LCI_of_mean[i] + UCI_of_mean[i]) / 2 , y = 5), 
+                 data = eacplt.data, shape = 10, cex = 5, colour = "white", alpha = 0.001) +
+      annotate("text", label = "LEL", x = eacplt.data$LEL[i] + abs(eacplt.data$LEL[i] / 20), 
+               y = 10, size = 4, colour = "red") +
+      annotate("text", label = "UEL", x = eacplt.data$UEL[i] - abs(eacplt.data$LEL[i] / 20), 
+               y = 10, size = 4, colour = "red") +
+      annotate("text", label = "90% CI", x = (eacplt.data$LCI_of_mean[i] + eacplt.data$UCI_of_mean[i]) / 2, 
+               y = 6.9, size = 4, colour = "black") +
+      geom_vline(xintercept = eacplt.data$LEL[i], 
+                 color = "red3", linetype = "longdash") +
+      geom_vline(xintercept = eacplt.data$UEL[i], 
+                 color = "red3", linetype = "longdash") +
+      geom_vline(xintercept = 0, 
+                 color = "grey50", linetype = "longdash") +
+      geom_segment(aes(x = eacplt.data$LCI_of_mean[i], xend = eacplt.data$UCI_of_mean[i], y = 7.5, yend = 7.5),
+                   color = "royalblue3") +
+      theme_bw() + 
+      scale_x_continuous("", 
+                         breaks = c(0, seq(eacplt.data$LEL[i], 
+                                           eacplt.data$UEL[i], 
+                                           (eacplt.data$UEL[i] - eacplt.data$LEL[i])/5 ))) +
+      labs(x = "", y = "") +
+      theme(axis.text.y = element_blank()) +
+      scale_y_continuous(breaks = NULL) +
+      labs(title = paste0(eacplt.data$Type[i], " Dimension ",eacplt.data$Dimension[i]), 
+           subtitle = paste0(subtitle, "LEL: lower equivalence limit, UEL: upper equivalence limit") ,
+           caption = paste(cap1, cap2)) +
+      theme(
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        plot.caption = element_text(hjust = 0.5)
+        )  
+    print(eac)
+}
+
+```
+
+\newpage
+
+# Decision of sample size reduction in the Verification Run stage
+
+`r ifelse((table(dim_info$Type)[1] + table(dim_info$Type)[2]) == 0, "", ifelse(Ppk_judege > 0, "In the section 3, some Ppk values (across cavities) of critical and process dimensions do not meet the criteria of Ppk > 1.33.", "In the section 3, all Ppk values (across cavities) of critical and process dimensions meet the criteria of Ppk > 1.33."))` `r ifelse((eacplt.data[, 8] %in% "equivalence" %>% sum()) == nrow(eacplt.data), "From the equivalent test, we conclude that all dimensions pass the equivalent test, which represents the similarity among cavity at the 0.10 significant level can be claimed.", "From the equivalent test, we conclude that not all dimensions pass the equivalent test, which represents the similarity among cavity at the 0.10 significant level cannot be claimed.")` `r ifelse((table(dim_info$Type)[1] + table(dim_info$Type)[2])[[1]] == 0, ifelse((eacplt.data[, 8] %in% "equivalence" %>% sum()) == nrow(eacplt.data), "Based on the analysis result, the reduced Verification Run can be applied.", "Based on the analysis result, the reduced Verification Run cannot be applied."), ifelse(((eacplt.data[, 8] %in% "equivalence" %>% sum()) == nrow(eacplt.data)) & Ppk_judege == 0, "Based on the analysis result, the reduced Verification Run can be applied.", "Based on the analysis result, the reduced Verification Run cannot be applied."))`
+
+```{r}
+unlink(path_, recursive = T, force = T)
+unlink(paste0(swd, "/", file_))
+```
+
